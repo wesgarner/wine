@@ -1093,6 +1093,10 @@ typedef struct _SYSTEM_BASIC_INFORMATION {
 } SYSTEM_BASIC_INFORMATION, *PSYSTEM_BASIC_INFORMATION;
 
 /* System Information Class 0x01 */
+typedef struct _SYSTEM_CPU_CACHE_INFORMATION {
+    ULONG ProcessorMask;
+    CACHE_DESCRIPTOR CacheInformation;   
+} SYSTEM_CPU_CACHE_INFORMATION, *PSYSTEM_CPU_CACHE_INFORMATION;
 
 typedef struct _SYSTEM_CPU_INFORMATION {
     WORD Architecture;
@@ -1100,6 +1104,10 @@ typedef struct _SYSTEM_CPU_INFORMATION {
     WORD Revision;       /* combination of CPU model and stepping */
     WORD Reserved;       /* always zero */
     DWORD FeatureSet;    /* see bit flags below */
+    ULONG Cores[64];	 /* Contains a Processormask for each physical core. Index is CoreID*/
+    ULONG ProcessorPackages[64]; /* Contains a Processormask for each processorpackage. Index is ProcessorPackage ID*/
+    ULONG NumaNodes[64];	 /* Contains a Processormask for each numa node. Index is NumaNodeNumber */
+    SYSTEM_CPU_CACHE_INFORMATION Caches[256];	/* Contains all cpu cache entries found */	
 } SYSTEM_CPU_INFORMATION, *PSYSTEM_CPU_INFORMATION;
 
 /* definitions of bits in the Feature set for the x86 processors */

@@ -3333,9 +3333,123 @@ HANDLE WINAPI GetCurrentProcess(void)
  */
 BOOL WINAPI GetLogicalProcessorInformation(PSYSTEM_LOGICAL_PROCESSOR_INFORMATION buffer, PDWORD pBufLen)
 {
-    FIXME("(%p,%p): stub\n", buffer, pBufLen);
-    SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
+  SYSTEM_CPU_INFORMATION sci;
+  NTSTATUS status;
+  
+  status = NtQuerySystemInformation( SystemCpuInformation, &sci, sizeof(sci), NULL );
+  if (status != STATUS_SUCCESS)
+  {
+    SetLastError( RtlNtStatusToDosError( status ) );    
     return FALSE;
+  }
+  /* Determine Elementcount of the Array */
+  {
+    DWORD arraysize;
+    DWORD counter = 0;
+    DWORD elementcount = 0;    
+    /* - Count RelationProcessorCore entries */
+    while(counter < (sizeof(sci.Cores) / sizeof(ULONG))){
+      if(sci.Cores[counter] > 0){
+	elementcount++;
+      }
+      counter++;
+    }
+    /* - Count RelationCache entries */
+    counter = 0;
+    while(counter < (sizeof(sci.Caches)/sizeof(SYSTEM_CPU_CACHE_INFORMATION))){
+      if(sci.Caches[counter].ProcessorMask > 0){
+	elementcount++;
+      }
+      counter++;
+    }
+    /* - Count RelationProcessorPackage entries */
+    counter = 0;
+    while(counter < (sizeof(sci.ProcessorPackages)/sizeof(ULONG))){
+      if(sci.ProcessorPackages[counter] > 0){
+	elementcount++;
+      }
+      counter++;
+    }
+    /* - Count RelationNumaNode entries */
+    counter = 0;
+    while(counter < (sizeof(sci.NumaNodes)/sizeof(ULONG))){
+      if(sci.NumaNodes[counter] > 0){
+	elementcount++;
+      }
+      counter++;
+    }
+    
+    /* Check that we have elements to process */
+    if(elementcount == 0){
+      FIXME("(%p,%p): Logical Processor Information in SystemCpuInformation missing. Reporting not implemented!",buffer,pBufLen);
+      SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
+      return FALSE;
+    }
+    /* Calculate Arraysize */
+    arraysize = elementcount * sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION);
+    /* Determine if the Array is large enough, return error if not */
+    if(*pBufLen < arraysize){
+      *pBufLen = arraysize;
+      SetLastError(ERROR_INSUFFICIENT_BUFFER);
+      return FALSE;
+    }
+  }
+  /* Fill the Array with data */
+  {
+    DWORD counter = 0;
+    DWORD elementcount = 0;
+    /* - Add RelationProcessorCore entries */
+    while(counter < (sizeof(sci.Cores) / sizeof(ULONG))){      
+      if(sci.Cores[counter] > 0){
+	ULONG processormask = sci.Cores[counter];
+	buffer[elementcount].ProcessorMask = processormask;
+	buffer[elementcount].Relationship = RelationProcessorCore;
+	buffer[elementcount].ProcessorCore.Flags = (sci.FeatureSet & CPU_FEATURE_HTT) ? 1 : 0;
+	
+	elementcount++;	
+      }
+      counter++;
+    }   
+    /* - Add RelationCache entries */
+    counter = 0;
+    while(counter < (sizeof(sci.Caches) / sizeof(SYSTEM_CPU_CACHE_INFORMATION))){
+      if(sci.Caches[counter].ProcessorMask > 0){	
+	CACHE_DESCRIPTOR cache = sci.Caches[counter].CacheInformation;
+	buffer[elementcount].ProcessorMask = sci.Caches[counter].ProcessorMask;
+	buffer[elementcount].Relationship = RelationCache;
+	/* Copy struct CACHE_DESCRIPTOR */
+	buffer[elementcount].Cache.Level = cache.Level;
+	buffer[elementcount].Cache.Associativity = cache.Associativity;
+	buffer[elementcount].Cache.LineSize = cache.LineSize;
+	buffer[elementcount].Cache.Size = cache.Size;
+	buffer[elementcount].Cache.Type = cache.Type;
+	elementcount++;
+      }
+      counter++;      
+    } 
+    /* - Add RelationProcessorPackage entries*/
+    counter = 0;
+    while(counter < (sizeof(sci.ProcessorPackages) / sizeof(ULONG))){
+      if(sci.ProcessorPackages[counter] > 0){
+	buffer[elementcount].ProcessorMask = sci.ProcessorPackages[counter];
+	buffer[elementcount].Relationship = RelationProcessorPackage;
+	elementcount++;
+      }
+      counter++;      
+    } 
+    /* - Add RelationNumaNode entries */
+    counter = 0;
+    while(counter < (sizeof(sci.NumaNodes) / sizeof(ULONG))){
+      if(sci.NumaNodes[counter] > 0){
+	buffer[elementcount].ProcessorMask = sci.NumaNodes[counter];
+	buffer[elementcount].Relationship = RelationNumaNode;
+	buffer[elementcount].NumaNode.NodeNumber = counter;
+      }
+      counter++;
+    }
+  }
+  
+  return TRUE;
 }
 
 /***********************************************************************

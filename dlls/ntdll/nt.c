@@ -890,6 +890,101 @@ static inline void get_cpuinfo(SYSTEM_CPU_INFORMATION* info)
     }
 }
 
+/* Methods to pull data from SysFS (/sys) */
+static BOOL sysfs_cpu_exists(int cpu)
+{ 
+  static char buf[200];
+  sprintf(buf, "/sys/devices/system/cpu/cpu%d",cpu);
+  return access(buf, F_OK) == 0;
+}
+static BOOL sysfs_cpucache_exists(int cpu, int cache)
+{ 
+  static char buf[200];
+  sprintf(buf, "/sys/devices/system/cpu/cpu%d/cache/index%d",cpu,cache);
+  return access(buf, F_OK) == 0;
+}
+static BOOL sysfs_numanode_exists(int node)
+{ 
+  static char buf[200];
+  sprintf(buf, "/sys/devices/system/node/node%d",node);
+  return access(buf, F_OK) == 0;
+}
+static int sysfs_cpu_topology_get(int cpu, const char *type){
+  static char buf[200];
+  FILE *fd;
+  int result;
+  
+  sprintf(buf, "/sys/devices/system/cpu/cpu%d/topology/%s",cpu,type);
+  fd = fopen(buf,"r");
+  if(fscanf(fd,"%d",&result) != 1){
+    result = -1;
+  }
+  fclose(fd);
+  return result;
+}
+static int sysfs_cpucache_getint(int cpu, int cache, const char *type){
+  static char buf[200];
+  FILE *fd;
+  char c;
+  int res, val;
+  
+  sprintf(buf, "/sys/devices/system/cpu/cpu%d/cache/index%d/%s",cpu,cache,type);
+  fd = fopen(buf,"r");  
+  if((res = fscanf(fd,"%d%c",&val, &c)) > 0){
+      if(res > 1){
+	switch(c){
+	  case 'M':
+	    val *= 1024 * 1024;
+	    break;
+	  case 'K':
+	    val *= 1024;
+	    break;
+	}
+      }
+    }else{
+      val = -1;
+    }
+  fclose(fd);
+  return val;
+}
+static int sysfs_cpucache_getmap(int cpu, int cache, const char *type){
+  static char buf[200];
+  FILE *fd;
+  int result;
+  
+  sprintf(buf, "/sys/devices/system/cpu/cpu%d/cache/index%d/%s",cpu,cache,type);
+  fd = fopen(buf,"r");
+  if(fscanf(fd,"%x",&result) != 1){
+    result = -1;
+  }
+  fclose(fd);
+  return result;
+}
+static BOOL sysfs_cpucache_gettype(int cpu, int cache, char* type){
+  static char buf[200];
+  FILE *fd;
+  int res;
+  
+  sprintf(buf, "/sys/devices/system/cpu/cpu%d/cache/index%d/type",cpu,cache);
+  fd = fopen(buf,"r");
+  res = fscanf(fd,"%s",type);
+  fclose(fd);
+  return res;  
+}
+static ULONG sysfs_numanode_cpumap(int node){
+  static char buf[200];
+  FILE *fd;
+  int result;
+  
+  sprintf(buf, "/sys/devices/system/node/node%d/cpumap",node);
+  fd = fopen(buf,"r");
+  if(fscanf(fd,"%x",&result) != 1){
+    result = -1;
+  }
+  fclose(fd);
+  return result;
+}
+
 /******************************************************************
  *		fill_cpu_info
  *
@@ -1063,11 +1158,117 @@ void fill_cpu_info(void)
                     user_shared_data->ProcessorFeatures[PF_XMMI64_INSTRUCTIONS_AVAILABLE] = TRUE;
                 if (strstr(value, "pae"))
                     user_shared_data->ProcessorFeatures[PF_PAE_ENABLED] = TRUE;
+                if (strstr(value, "ht"))
+                    cached_sci.FeatureSet |= CPU_FEATURE_HTT;
 
                 continue;
             }
 	}
 	fclose(f);
+	
+	/* Pull additional data out of SysFS */
+	{
+	  int numadummymask = 0;
+	  int sysfs_cpucount = 0;
+	  int sysfs_nodecount = 0;
+	  
+	  while(sysfs_cpu_exists(sysfs_cpucount)){	
+	    sysfs_cpucount++;
+	  }
+	  TRACE("SysFS CPU Count: %d\n", sysfs_cpucount);	  
+	  if (sysfs_cpucount > 0){
+	    int cpucounter, cachecounter;
+	    /* Parse every CPU's CoreID and Physical Package
+	     *     and generate the ProcessorMask for each */
+	    cpucounter = 0;
+	    while(cpucounter < sysfs_cpucount){ 
+	      int core, ppackage;
+	      /* Determine Core ID and add to matching ProcessorMask */
+	      core = sysfs_cpu_topology_get(cpucounter, "core_id");
+	      if(core >= 0 && core < (sizeof(cached_sci.Cores) / sizeof(ULONG))){
+		numadummymask |= (1 << cpucounter);
+		cached_sci.Cores[core] |= (1 << cpucounter);
+		TRACE("Processormask on Core %d is now %d\n", core, cached_sci.Cores[core]);
+	      }
+	      
+	      /* Determine ProcessorPackage and add to matching ProcessorMask */
+	      ppackage = sysfs_cpu_topology_get(cpucounter, "physical_package_id");
+	      if(ppackage >= 0 && ppackage < (sizeof(cached_sci.ProcessorPackages) / sizeof(ULONG))){
+		cached_sci.ProcessorPackages[ppackage] |= (1 << cpucounter);
+	      }
+	      
+	      /* Determine CPUs Caches */
+	      cachecounter = 0;
+	      while(sysfs_cpucache_exists(cpucounter,cachecounter))
+	      {
+		/* Get all cache information from SysFS */
+		ULONG processormask = sysfs_cpucache_getmap(cpucounter,cachecounter,"shared_cpu_map");
+		BYTE level = sysfs_cpucache_getint(cpucounter,cachecounter,"level");
+		BYTE associativity = sysfs_cpucache_getint(cpucounter,cachecounter,"ways_of_associativity");
+		WORD linesize = sysfs_cpucache_getint(cpucounter,cachecounter,"coherency_line_size");
+		DWORD size = sysfs_cpucache_getint(cpucounter,cachecounter,"size");
+		PROCESSOR_CACHE_TYPE type = 0;
+		char typestring[16];
+		if (sysfs_cpucache_gettype(cpucounter,cachecounter,typestring) > 0){
+		  switch(typestring[0]){
+		    case 'D':
+		      type = CacheData;
+		      break;
+		    case 'I':
+		      type = CacheInstruction;
+		      break;
+		    case 'U':
+		      type = CacheUnified;
+		      break;
+		    case 'T':
+		      type = CacheTrace;
+		      break;
+		    default:
+		      FIXME("Unknown cachetype %s", typestring);
+		      break;
+		  }
+		  
+		  /* Iterate the array ... */
+		  {
+		    int arraycounter = 0;
+		    while(arraycounter < (sizeof(cached_sci) / sizeof(SYSTEM_CPU_CACHE_INFORMATION))){
+		      if(cached_sci.Caches[arraycounter].ProcessorMask == 0){
+			/* ... and add the entry at the first free position */
+			cached_sci.Caches[arraycounter].ProcessorMask = processormask;	
+			cached_sci.Caches[arraycounter].CacheInformation.Level = level;
+			cached_sci.Caches[arraycounter].CacheInformation.Associativity = associativity;
+			cached_sci.Caches[arraycounter].CacheInformation.LineSize = linesize;
+			cached_sci.Caches[arraycounter].CacheInformation.Size = size;
+			cached_sci.Caches[arraycounter].CacheInformation.Type = type;
+			break;
+		      }else if(cached_sci.Caches[arraycounter].ProcessorMask == processormask && cached_sci.Caches[arraycounter].CacheInformation.Level == level && cached_sci.Caches[arraycounter].CacheInformation.Type == type){
+			/* ... and ignore it because the entry exists */
+			break;	
+		      }else{
+			/* ... go further down the array */
+			arraycounter++; 	    
+		      }	  
+		    }    
+		  }
+		}
+		cachecounter++;
+	      }
+	      
+	      /* Next CPU */
+	      cpucounter++;
+	    }
+	    
+	    /* Determine Numa Nodes */
+	    while(sysfs_numanode_exists(sysfs_nodecount)){
+	      cached_sci.NumaNodes[sysfs_nodecount] = sysfs_numanode_cpumap(sysfs_nodecount);
+	      sysfs_nodecount++;
+	    }
+	    /* If this is a non-numa system add a dummy */
+	    if(sysfs_nodecount == 0 && !sysfs_numanode_exists(sysfs_nodecount)){
+	      cached_sci.NumaNodes[0] = numadummymask;
+	    }
+	  }	    
+	}
     }
 #elif defined (__NetBSD__)
     {
